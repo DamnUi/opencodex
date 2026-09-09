@@ -1651,9 +1651,12 @@ export function createOpenAIChatAdapter(provider: OcxProviderConfig): ProviderAd
         };
       };
       if (hasShrinkableOpenAIChatImages(messages)) {
+        // A normalizer failure must not fail the turn. The shared pipeline already leaves an
+        // image it cannot process untouched, so the worst case here is the request the caller
+        // would have sent anyway: oversized, and rejected upstream with a classifiable error.
         return normalizeOpenAIChatImages(messages, {
           ...(incoming?.imageTierBias !== undefined ? { tierBias: incoming.imageTierBias } : {}),
-        }).then(finish);
+        }).then(finish, finish);
       }
       return finish();
     },

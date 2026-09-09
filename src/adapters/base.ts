@@ -15,8 +15,8 @@ export interface IncomingMeta {
   providerFetch?: typeof globalThis.fetch;
   /**
    * Image-normalization ladder bias for upstream-413 tightened retries: every image
-   * starts one tier lower (devlog/260714_image_normalization_pipeline/030). Only the
-   * anthropic adapter consumes it; others ignore it.
+   * starts one tier lower (devlog/260714_image_normalization_pipeline/030). Consumed by
+   * the anthropic and openai-chat adapters; others ignore it.
    */
   imageTierBias?: number;
 }

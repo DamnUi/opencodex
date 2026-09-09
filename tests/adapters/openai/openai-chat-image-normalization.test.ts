@@ -1,12 +1,14 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { createOpenAIChatAdapter } from "../../../src/adapters/openai-chat";
+import { createMimoFreeAdapter } from "../../../src/adapters/mimo-free";
 import {
   hasShrinkableOpenAIChatImages,
   normalizeOpenAIChatImages,
   OPENAI_CHAT_IMAGE_BASE64_BUDGET,
 } from "../../../src/adapters/openai-chat-images";
-import { resetNormalizeStateForTests, TIER_SPECS, type EncodeFn } from "../../../src/adapters/anthropic-image-normalize";
+import { resetNormalizeStateForTests, type EncodeFn } from "../../../src/adapters/anthropic-image-normalize";
 import type { OcxMessage, OcxParsedRequest, OcxProviderConfig } from "../../../src/types";
+import { createTestTranslatorBudget } from "../../helpers/translator-budget";
 
 // Issue #4112 follow-up: chat-completions providers such as GitHub Copilot reject a body
 // over roughly 5.2MB with a bare 413 and no diagnostic content. Nothing downstream of the
@@ -158,7 +160,6 @@ describe("openai-chat inline image normalization", () => {
   });
 
   test("terminal overflow keeps images attached instead of dropping the oldest", async () => {
-    const terminalEdge = TIER_SPECS[TIER_SPECS.length - 1]!.maxEdge;
     const small = await realPngB64(40, 40);
     const messages = [{
       role: "user",
@@ -174,8 +175,20 @@ describe("openai-chat inline image normalization", () => {
     });
     const parts = imageParts(messages as ChatMsg[]);
     expect(parts).toHaveLength(6);
-    expect(terminalEdge).toBeGreaterThan(0);
     for (const part of parts) expect(part.image_url?.url).toContain("base64,");
+  });
+
+  test("a normalizer failure degrades to the unshrunk request instead of failing the turn", async () => {
+    const big = await noisyPngB64(1000, 1000);
+    const parsed = parsedWith([imageMessage([dataUrl(big)])]);
+    const built = createOpenAIChatAdapter(provider).buildRequest(parsed, {
+      headers: new Headers(),
+      translatorBudget: createTestTranslatorBudget(),
+      imageTierBias: Number.NaN,
+    });
+    const request = await (built as Promise<{ body: string }>);
+    expect(typeof request.body).toBe("string");
+    expect(imageParts(wireMessages(request.body))).toHaveLength(1);
   });
 
   test("a remote https image is left untouched", async () => {
@@ -217,6 +230,22 @@ describe("openai-chat inline image normalization", () => {
     await normalizeOpenAIChatImages("nonsense");
   });
 
+  test("a delegating adapter awaits the built request instead of reading an undefined body", async () => {
+    // mimo-free wraps this adapter and reads baseReq.body. When an image turn makes
+    // buildRequest return a promise, a synchronous cast there yields undefined and the
+    // JSON.parse of the delegated body throws.
+    const big = await noisyPngB64(1000, 1000);
+    const parsed = parsedWith([imageMessage([dataUrl(big)])]);
+    const adapter = createMimoFreeAdapter({
+      ...provider,
+      adapter: "mimo-free",
+      baseUrl: "https://api.xiaomimimo.com/api/free-ai/openai/chat",
+    });
+    const built = await adapter.buildRequest(parsed, { headers: new Headers() });
+    expect(typeof built.body).toBe("string");
+    expect(imageParts(wireMessages(built.body as string))).toHaveLength(1);
+  });
+
   test("imageTierBias from incoming meta reaches the normalizer", async () => {
     const big = await noisyPngB64(1000, 1000);
     const urls = Array.from({ length: 4 }, () => dataUrl(big));
@@ -226,6 +255,7 @@ describe("openai-chat inline image normalization", () => {
       resetNormalizeStateForTests();
       const built = adapter.buildRequest(parsedWith([imageMessage(urls)]), {
         headers: new Headers(),
+        translatorBudget: createTestTranslatorBudget(),
         ...(imageTierBias !== undefined ? { imageTierBias } : {}),
       });
       const request = await (built as Promise<{ body: string }>);
