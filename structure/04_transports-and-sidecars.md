@@ -859,6 +859,36 @@ prompts or images: it does not own the client's transcript, and deleting input w
 was never analyzed. The streaming error message is proxy-owned and bounded instead of relaying the
 upstream 413 body, which may echo request content.
 
+### openai-chat inline image budget
+
+Several OpenAI-compatible providers enforce a raw byte ceiling on the serialized Chat Completions
+body that is separate from any token limit. GitHub Copilot rejects at roughly 5.2MB with a bare 413
+and no diagnostic content, and nothing downstream of an adapter can shrink a request once it has
+been built. `src/adapters/openai-chat-images.ts` therefore runs the shared image ladder over
+`image_url` data-URL parts while the request is being built.
+
+The scope is every provider that reaches `createOpenAIChatAdapter`, not only Copilot, plus
+`mimo-free` through its `contractParent` delegation. It is a **default lossy transformation**:
+re-encoded images are emitted as JPEG, so a PNG alpha channel is flattened and detail is lost at
+lower tiers. This is the same trade the anthropic and kiro wires already make. Re-encoding is
+skipped entirely when an image already fits its tier's dimension and byte caps, so ordinary
+screenshots pass through byte-identical.
+
+`OPENAI_CHAT_IMAGE_BASE64_BUDGET` (3.5MiB) is a **best-effort image budget, not a request-size
+guarantee**. It bounds inline image bytes only; text, tool schemas and history are outside it, and a
+turn can still exceed a provider's ceiling on those alone. Images are never dropped on this wire
+(`overflowAction: "none"`, and `drop` restores the original URL), because unlike anthropic there is
+no downstream guard that would re-attach or textify a removed image. An image floored at the
+terminal 320px tier stays attached even when the total is still over budget.
+
+This runs in the adapter's `buildRequest`. The native Chat fast path
+(`src/server/chat-native.ts`, entered from `src/server/chat-completions.ts` when
+`isNativeChatRouteEligible` holds) builds its wire body through
+`buildOpenAIChatPassthroughRequest` and so **bypasses this normalization**. A Chat-inbound caller
+on an eligible native route keeps its original image bytes; only routed Responses traffic through
+the adapter is normalized. Widening the budget to that lane is a separate contract change, since the
+fast path is defined as a passthrough of the caller's body.
+
 [Decision Log]
 - 목적과 의도: Stop Codex from replaying a provider-rejected oversized turn and hand the failure
   to the client's existing context-compaction semantics.

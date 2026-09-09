@@ -156,6 +156,7 @@ The server exposes `POST /api/stop` which restores native Codex config, stops an
 | `src/adapters/kiro.ts` and its `src/adapters/kiro-*.ts` helpers | Kiro event/tool/thinking/truncation/retry handling. |
 | `src/adapters/mimo-free.ts` | Mimo Free transport (client identity + JWT). |
 | `src/adapters/image.ts`, `src/adapters/anthropic-image-guard.ts`, `src/adapters/anthropic-image-normalize.ts` | Image conversion for adapter ingress and Anthropic-specific normalization/limits. |
+| `src/adapters/openai-chat-images.ts` | Inline `image_url` budget for every `openai-chat` provider. Lossy JPEG re-encode above a best-effort 3.5MiB image budget; never drops an image; bypassed by the native Chat fast path. |
 | `src/adapters/run-turn-queue.ts`, `src/adapters/tool-catalog-nudge.ts`, `src/adapters/identity.ts`, `src/adapters/upstream-http-error.ts` | Shared adapter execution support: turn queueing, tool-catalog nudging, client identity, upstream error normalization. |
 
 Adapter output must stay in internal `AdapterEvent` form until `bridge.ts` converts it back to

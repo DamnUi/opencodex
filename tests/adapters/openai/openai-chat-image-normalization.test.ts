@@ -1,12 +1,20 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { createOpenAIChatAdapter } from "../../../src/adapters/openai-chat";
+import {
+  buildOpenAIChatPassthroughRequest,
+  createOpenAIChatAdapter,
+} from "../../../src/adapters/openai-chat";
 import { createMimoFreeAdapter } from "../../../src/adapters/mimo-free";
 import {
   hasShrinkableOpenAIChatImages,
   normalizeOpenAIChatImages,
   OPENAI_CHAT_IMAGE_BASE64_BUDGET,
 } from "../../../src/adapters/openai-chat-images";
-import { resetNormalizeStateForTests, type EncodeFn } from "../../../src/adapters/anthropic-image-normalize";
+import {
+  getNormalizeStatsForTests,
+  resetNormalizeStateForTests,
+  TIER_SPECS,
+  type EncodeFn,
+} from "../../../src/adapters/anthropic-image-normalize";
 import type { OcxMessage, OcxParsedRequest, OcxProviderConfig } from "../../../src/types";
 import { createTestTranslatorBudget } from "../../helpers/translator-budget";
 
@@ -160,35 +168,55 @@ describe("openai-chat inline image normalization", () => {
   });
 
   test("terminal overflow keeps images attached instead of dropping the oldest", async () => {
-    const small = await realPngB64(40, 40);
+    // The input has to miss every tier's dimension and byte caps, otherwise processAt
+    // passes it through before the injected encoder is ever consulted and the ladder is
+    // never walked. A 1000x1000 noise PNG misses them; a small one does not.
+    const big = await noisyPngB64(1000, 1000);
     const messages = [{
       role: "user",
       content: Array.from({ length: 6 }, () => ({
         type: "image_url",
-        image_url: { url: dataUrl(small) },
+        image_url: { url: dataUrl(big) },
       })),
     }];
+    const tiersReached: number[] = [];
     // Every tier, including the floor, still exceeds the budget on its own.
     await normalizeOpenAIChatImages(messages, {
-      encode: sizedEncoder(() => OPENAI_CHAT_IMAGE_BASE64_BUDGET),
+      encode: (input, spec, quality) => {
+        tiersReached.push(spec.maxEdge);
+        return sizedEncoder(() => OPENAI_CHAT_IMAGE_BASE64_BUDGET)(input, spec, quality);
+      },
       validate: () => Promise.resolve(),
     });
+
+    // The ladder actually ran and bottomed out at the terminal tier.
+    const terminalEdge = TIER_SPECS[TIER_SPECS.length - 1]?.maxEdge;
+    expect(getNormalizeStatsForTests().encodeCalls).toBeGreaterThan(0);
+    expect(tiersReached).toContain(terminalEdge);
+
     const parts = imageParts(messages as ChatMsg[]);
+    // Still over budget at the floor, and every image survives regardless.
+    const total = parts.reduce((sum, p) => sum + (p.image_url?.url.split(",")[1]?.length ?? 0), 0);
+    expect(total).toBeGreaterThan(OPENAI_CHAT_IMAGE_BASE64_BUDGET);
     expect(parts).toHaveLength(6);
     for (const part of parts) expect(part.image_url?.url).toContain("base64,");
   });
 
   test("a normalizer failure degrades to the unshrunk request instead of failing the turn", async () => {
     const big = await noisyPngB64(1000, 1000);
-    const parsed = parsedWith([imageMessage([dataUrl(big)])]);
+    const original = dataUrl(big);
+    const parsed = parsedWith([imageMessage([original])]);
     const built = createOpenAIChatAdapter(provider).buildRequest(parsed, {
       headers: new Headers(),
       translatorBudget: createTestTranslatorBudget(),
       imageTierBias: Number.NaN,
     });
     const request = await (built as Promise<{ body: string }>);
-    expect(typeof request.body).toBe("string");
-    expect(imageParts(wireMessages(request.body))).toHaveLength(1);
+    const parts = imageParts(wireMessages(request.body));
+    expect(parts).toHaveLength(1);
+    // The fallback is the unshrunk request: the exact original bytes, not a re-encode.
+    expect(parts[0]?.image_url?.url).toBe(original);
+    expect(getNormalizeStatsForTests().encodeCalls).toBe(0);
   });
 
   test("a remote https image is left untouched", async () => {
@@ -267,5 +295,36 @@ describe("openai-chat inline image normalization", () => {
     };
 
     expect(await build(3)).toBeLessThan(await build());
+  });
+
+  test("the native Chat fast path bypasses normalization and keeps the caller's bytes", async () => {
+    // Scope boundary, asserted so it cannot move silently: normalization lives in the
+    // adapter's buildRequest, but a native Chat route (chat-native.ts, entered when
+    // isNativeChatRouteEligible holds) builds its wire body through this passthrough
+    // builder instead, so a Chat-inbound caller on that lane keeps its original image
+    // bytes. Widening the budget to the fast path is a separate contract change, since
+    // that lane is defined as a passthrough of the caller's body. The eligibility
+    // predicate itself is not imported here: chat-native's transitive graph fails to
+    // load under this suite for reasons that predate this change.
+    const big = await noisyPngB64(1000, 1000);
+    const url = dataUrl(big);
+    const rawBody = {
+      model: "claude-opus-5",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "what is this" },
+          ...Array.from({ length: 4 }, () => ({ type: "image_url", image_url: { url } })),
+        ],
+      }],
+    };
+
+    resetNormalizeStateForTests();
+    const request = buildOpenAIChatPassthroughRequest(provider, rawBody, "claude-opus-5", false);
+    const parts = imageParts(wireMessages(request.body));
+
+    expect(getNormalizeStatsForTests().encodeCalls).toBe(0);
+    expect(parts).toHaveLength(4);
+    for (const part of parts) expect(part.image_url?.url).toBe(url);
   });
 });
