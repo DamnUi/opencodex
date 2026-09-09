@@ -241,7 +241,10 @@ describe("openai-chat inline image normalization", () => {
       adapter: "mimo-free",
       baseUrl: "https://api.xiaomimimo.com/api/free-ai/openai/chat",
     });
-    const built = await adapter.buildRequest(parsed, { headers: new Headers() });
+    const built = await adapter.buildRequest(parsed, {
+      headers: new Headers(),
+      translatorBudget: createTestTranslatorBudget(),
+    });
     expect(typeof built.body).toBe("string");
     expect(imageParts(wireMessages(built.body as string))).toHaveLength(1);
   });
