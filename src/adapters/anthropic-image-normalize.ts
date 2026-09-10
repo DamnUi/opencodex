@@ -225,6 +225,11 @@ export async function normalizeImageTargets(targets: NormalizeTarget[], options:
       const e = entries[i];
       if (!e) continue;
       e.target.drop(OVERFLOW_DROP_TEXT);
+      if (e.target.retainsBytesOnDrop) {
+        // The drop left the bytes in place, so they still count and dropping another
+        // copy of this target would not help. Move on to one that can actually leave.
+        continue;
+      }
       sum -= e.size;
       entries[i] = null;
     }

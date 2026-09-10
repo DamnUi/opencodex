@@ -542,6 +542,30 @@ describe("bounded parallel first pass (WP170)", () => {
     expect(droppedForOverflow).toEqual([0]);
   });
 
+  test("terminal overflow keeps counting a target whose drop leaves the bytes on the wire", async () => {
+    // A wire whose drop cannot remove bytes (openai-chat) must not have them subtracted
+    // from the total here either. Subtracting would let the loop believe it reached the
+    // budget after a drop that changed nothing, and stop before a removable target.
+    const encode: EncodeFn = (_input, spec) => {
+      const px = fakePngBase64(Math.min(64, spec.maxEdge), Math.min(64, spec.maxEdge), 3 * 1024);
+      return Promise.resolve({ data: px.slice(0, 4 * 1024), mediaType: "image/webp" });
+    };
+    const images = distinctImages(4);
+    const droppedForOverflow: number[] = [];
+    const targets: NormalizeTarget[] = images.map((b64, i) => ({
+      base64: b64,
+      mediaType: "image/png",
+      replace: () => {},
+      drop: note => { if (note.includes("provider request budget")) droppedForOverflow.push(i); },
+      // Only the oldest target keeps its bytes when dropped.
+      retainsBytesOnDrop: i === 0,
+    }));
+    // Budget fits 3 of the 4 terminal outputs. Dropping the oldest frees nothing, so the
+    // loop must continue and drop the next one to actually get under budget.
+    await normalizeImageTargets(targets, { encode, budget: 3 * 4 * 1024, overflowAction: "drop" });
+    expect(droppedForOverflow).toEqual([0, 1]);
+  });
+
   test("skip paths free the worker slot: URL sources and over-limit images never reach the encoder", async () => {
     const g = gatedEncoder();
     const real = distinctImages(3);
