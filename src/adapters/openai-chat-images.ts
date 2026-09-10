@@ -84,6 +84,10 @@ export async function normalizeOpenAIChatImages(
       drop: () => {
         // Preserve the original image URL when it cannot be normalized.
       },
+      // The drop above is a no-op, so these bytes are still on the wire and must keep
+      // counting against the budget. Without this the core would stop counting them and
+      // the demotion loop could stop early, shipping a body that is still oversized.
+      retainsBytesOnDrop: true,
     });
   });
   if (targets.length === 0) return;

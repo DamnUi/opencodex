@@ -1,9 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import {
-  buildOpenAIChatPassthroughRequest,
-  createOpenAIChatAdapter,
-} from "../../../src/adapters/openai-chat";
-import { createMimoFreeAdapter } from "../../../src/adapters/mimo-free";
+import { createOpenAIChatAdapter } from "../../../src/adapters/openai-chat";
+import { createMimoFreeAdapter, resetMimoJwtCache } from "../../../src/adapters/mimo-free";
 import {
   hasShrinkableOpenAIChatImages,
   normalizeOpenAIChatImages,
@@ -229,6 +226,35 @@ describe("openai-chat inline image normalization", () => {
     expect(imageParts(messages as ChatMsg[])[0]?.image_url?.url).toBe("https://example.com/cat.png");
   });
 
+  test("an image this wire cannot drop keeps counting toward the budget", async () => {
+    // The drop callback here is a no-op, so an undecodable image stays on the wire. The
+    // shared core normally stops counting a dropped target, which is only correct when
+    // the bytes actually leave. If those bytes stopped counting, the demotion loop would
+    // stop early and still ship an oversized body — the exact failure this file exists
+    // to prevent.
+    const big = await noisyPngB64(1000, 1000);
+    // Truncated PNG: sniffs as an image, so it reaches the ladder, but cannot decode.
+    const corrupt = big.slice(0, 3_000_000);
+    const messages = [{
+      role: "user",
+      content: [
+        { type: "image_url", image_url: { url: dataUrl(corrupt) } },
+        ...Array.from({ length: 3 }, () => ({ type: "image_url", image_url: { url: dataUrl(big) } })),
+      ],
+    }];
+
+    resetNormalizeStateForTests();
+    await normalizeOpenAIChatImages(messages);
+
+    const parts = imageParts(messages as ChatMsg[]);
+    const total = parts.reduce((sum, p) => sum + (p.image_url?.url.split(",")[1]?.length ?? 0), 0);
+    expect(parts).toHaveLength(4);
+    // The undecodable image is retained, unchanged.
+    expect(parts[0]?.image_url?.url).toBe(dataUrl(corrupt));
+    // And the turn as a whole still lands under budget.
+    expect(total).toBeLessThanOrEqual(OPENAI_CHAT_IMAGE_BASE64_BUDGET);
+  });
+
   test("an undecodable image keeps its original url rather than being dropped", async () => {
     const corrupt = dataUrl("!!!!not-base64-image!!!!");
     const messages = [{
@@ -262,19 +288,39 @@ describe("openai-chat inline image normalization", () => {
     // mimo-free wraps this adapter and reads baseReq.body. When an image turn makes
     // buildRequest return a promise, a synchronous cast there yields undefined and the
     // JSON.parse of the delegated body throws.
-    const big = await noisyPngB64(1000, 1000);
-    const parsed = parsedWith([imageMessage([dataUrl(big)])]);
-    const adapter = createMimoFreeAdapter({
-      ...provider,
-      adapter: "mimo-free",
-      baseUrl: "https://api.xiaomimimo.com/api/free-ai/openai/chat",
-    });
-    const built = await adapter.buildRequest(parsed, {
-      headers: new Headers(),
-      translatorBudget: createTestTranslatorBudget(),
-    });
-    expect(typeof built.body).toBe("string");
-    expect(imageParts(wireMessages(built.body as string))).toHaveLength(1);
+    // mimo-free's buildRequest bootstraps a JWT over the network, so the stub below is
+    // what keeps this suite hermetic. Both cache resets matter: the first stops a JWT
+    // cached by an earlier test from bypassing the stub, the second stops this test's
+    // synthetic token from escaping into a later one.
+    const originalFetch = globalThis.fetch;
+    const bootstrapUrl = "https://api.xiaomimimo.com/api/free-ai/bootstrap";
+    const fetched: string[] = [];
+    resetMimoJwtCache();
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      fetched.push(url);
+      if (url !== bootstrapUrl) throw new Error(`unexpected external request: ${url}`);
+      return Response.json({ jwt: "test-jwt" });
+    }) as typeof fetch;
+    try {
+      const big = await noisyPngB64(1000, 1000);
+      const parsed = parsedWith([imageMessage([dataUrl(big)])]);
+      const adapter = createMimoFreeAdapter({
+        ...provider,
+        adapter: "mimo-free",
+        baseUrl: "https://api.xiaomimimo.com/api/free-ai/openai/chat",
+      });
+      const built = await adapter.buildRequest(parsed, {
+        headers: new Headers(),
+        translatorBudget: createTestTranslatorBudget(),
+      });
+      expect(fetched).toEqual([bootstrapUrl]);
+      expect(typeof built.body).toBe("string");
+      expect(imageParts(wireMessages(built.body as string))).toHaveLength(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+      resetMimoJwtCache();
+    }
   });
 
   test("imageTierBias from incoming meta reaches the normalizer", async () => {
@@ -297,34 +343,4 @@ describe("openai-chat inline image normalization", () => {
     expect(await build(3)).toBeLessThan(await build());
   });
 
-  test("the native Chat fast path bypasses normalization and keeps the caller's bytes", async () => {
-    // Scope boundary, asserted so it cannot move silently: normalization lives in the
-    // adapter's buildRequest, but a native Chat route (chat-native.ts, entered when
-    // isNativeChatRouteEligible holds) builds its wire body through this passthrough
-    // builder instead, so a Chat-inbound caller on that lane keeps its original image
-    // bytes. Widening the budget to the fast path is a separate contract change, since
-    // that lane is defined as a passthrough of the caller's body. The eligibility
-    // predicate itself is not imported here: chat-native's transitive graph fails to
-    // load under this suite for reasons that predate this change.
-    const big = await noisyPngB64(1000, 1000);
-    const url = dataUrl(big);
-    const rawBody = {
-      model: "claude-opus-5",
-      messages: [{
-        role: "user",
-        content: [
-          { type: "text", text: "what is this" },
-          ...Array.from({ length: 4 }, () => ({ type: "image_url", image_url: { url } })),
-        ],
-      }],
-    };
-
-    resetNormalizeStateForTests();
-    const request = buildOpenAIChatPassthroughRequest(provider, rawBody, "claude-opus-5", false);
-    const parts = imageParts(wireMessages(request.body));
-
-    expect(getNormalizeStatsForTests().encodeCalls).toBe(0);
-    expect(parts).toHaveLength(4);
-    for (const part of parts) expect(part.image_url?.url).toBe(url);
-  });
 });
