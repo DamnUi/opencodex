@@ -19,10 +19,15 @@ export const OPENAI_CHAT_IMAGE_BASE64_BUDGET = 3_670_016; // 3.5MiB
 export interface NormalizeOpenAIChatImagesOptions
   extends Pick<NormalizeOptions, "encode" | "tierBias" | "validate"> {}
 
+/** Whether `value` is a plain object, so message and part shapes can be walked safely. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/**
+ * Walk every well-formed `image_url` part in a Chat Completions message array, ignoring
+ * malformed shapes rather than throwing on them. Returning false from `visit` stops the walk.
+ */
 function forEachImagePart(
   messages: unknown,
   visit: (imageUrl: Record<string, unknown>, url: string) => boolean | void,

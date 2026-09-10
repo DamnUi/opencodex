@@ -30,6 +30,7 @@ const provider: OcxProviderConfig = {
 const ONE_PX_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
+/** A real, decodable PNG of the requested size, upscaled from a 1px source. */
 async function realPngB64(width: number, height: number): Promise<string> {
   const buf = await new Bun.Image(Buffer.from(ONE_PX_PNG, "base64")).resize(width, height).png().toBuffer();
   return Buffer.from(buf).toString("base64");
@@ -68,6 +69,7 @@ async function noisyPngB64(width: number, height: number): Promise<string> {
 }
 
 
+/** Wrap raw base64 as a data URL, the only image form this wire normalizes. */
 function dataUrl(b64: string, mediaType = "image/png"): string {
   return `data:${mediaType};base64,${b64}`;
 }
@@ -83,6 +85,7 @@ interface ChatMsg {
   content?: string | ChatPart[];
 }
 
+/** Minimal parsed request carrying just the messages an adapter build needs. */
 function parsedWith(messages: OcxMessage[]): OcxParsedRequest {
   return {
     modelId: "claude-opus-5",
@@ -92,6 +95,7 @@ function parsedWith(messages: OcxMessage[]): OcxParsedRequest {
   } as unknown as OcxParsedRequest;
 }
 
+/** A user turn holding `text` plus one image per URL, in canonical (pre-wire) form. */
 function imageMessage(urls: string[], text = "what is this"): OcxMessage {
   return {
     role: "user",
@@ -103,10 +107,12 @@ function imageMessage(urls: string[], text = "what is this"): OcxMessage {
   } as unknown as OcxMessage;
 }
 
+/** Read the messages back out of a built request body. */
 function wireMessages(body: string): ChatMsg[] {
   return (JSON.parse(body) as { messages: ChatMsg[] }).messages;
 }
 
+/** Every image part across the given messages, flattened. */
 function imageParts(messages: ChatMsg[]): ChatPart[] {
   return messages.flatMap(m => (Array.isArray(m.content) ? m.content : [])).filter(p => p.type === "image_url");
 }

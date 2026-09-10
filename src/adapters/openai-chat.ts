@@ -1456,6 +1456,11 @@ export function createOpenAIChatAdapter(provider: OcxProviderConfig): ProviderAd
       lastRequestedModelId = parsed.modelId;
       const { url, headers, hasCredential } = openAIChatTransport(provider);
       const messages = frameAgentRouterMessages(provider.baseUrl, messagesToChatFormat(parsed, provider));
+      /**
+       * Build the wire request from `messages` as they stand. Called directly for the
+       * synchronous path, or after image normalization has rewritten `messages` in place.
+       * Everything after message construction lives here so both paths share one body.
+       */
       const finish = (): AdapterRequest => {
         const tools = toolsToChatFormatForProvider(parsed, provider);
         const toolChoice = toolChoiceToChatFormat(parsed.options.toolChoice, parsed.context.tools, provider);
